@@ -1,0 +1,125 @@
+diff --git a/app/src/main/java/com/kingzcheung/xime/settings/SettingsPreferences.kt b/app/src/main/java/com/kingzcheung/xime/settings/SettingsPreferences.kt
+index 2e42f0e..77e8f52 100644
+--- a/app/src/main/java/com/kingzcheung/xime/settings/SettingsPreferences.kt
++++ b/app/src/main/java/com/kingzcheung/xime/settings/SettingsPreferences.kt
+@@ -604,6 +604,12 @@ private const val DEFAULT_PREDICTION_MODEL_ID = "predictive-text-small"
+     const val LETTER_CASE_LOWER = "lower"
+     const val LETTER_CASE_UPPER = "upper"
+ 
++    /** 锁定大写：开启后 Shift 单击即锁定大写（再单击解除），不再需要双击。默认关闭。 */
++    const val KEY_SHIFT_CAPS_LOCK = "shift_caps_lock"
++
++    fun isShiftCapsLockEnabled(context: Context): Boolean =
++        getPrefs(context).getBoolean(KEY_SHIFT_CAPS_LOCK, false)
++
+     /** 键盘按键字符大小（百分比，80–130，默认 100）。 */
+     const val KEY_KEYBOARD_TEXT_SCALE = "keyboard_text_scale"
+     const val KEYBOARD_TEXT_SCALE_MIN = 80
+diff --git a/app/src/main/java/com/kingzcheung/xime/ui/settings/LayoutDisplaySettingsSpecs.kt b/app/src/main/java/com/kingzcheung/xime/ui/settings/LayoutDisplaySettingsSpecs.kt
+index 36d304e..2412306 100644
+--- a/app/src/main/java/com/kingzcheung/xime/ui/settings/LayoutDisplaySettingsSpecs.kt
++++ b/app/src/main/java/com/kingzcheung/xime/ui/settings/LayoutDisplaySettingsSpecs.kt
+@@ -166,6 +166,13 @@ object LayoutDisplaySettingsSpecs {
+             ),
+             offWhenDisabled = true,
+         ),
++        // 单击 shift 即锁定大写；关闭时保留原来的「单击临时大写 / 双击锁定」
++        SettingSpec.Switch(
++            key = SettingsPreferences.KEY_SHIFT_CAPS_LOCK,
++            titleRes = R.string.s_suodingdaxie,
++            descriptionRes = R.string.s_suodingdaxie_fu,
++            default = false,
++        ),
+     )
+ 
+     /** 展开页布局：网格 / 流式（枚举存值）。 */
+diff --git a/app/src/main/java/com/kingzcheung/xime/viewmodel/KeyboardViewModel.kt b/app/src/main/java/com/kingzcheung/xime/viewmodel/KeyboardViewModel.kt
+index d58fd77..981335f 100644
+--- a/app/src/main/java/com/kingzcheung/xime/viewmodel/KeyboardViewModel.kt
++++ b/app/src/main/java/com/kingzcheung/xime/viewmodel/KeyboardViewModel.kt
+@@ -40,6 +40,9 @@ import com.kingzcheung.xime.util.FileLogger
+ 
+ enum class ShiftMode { OFF, SINGLE, CAPS }
+ 
++/** 双击判定窗口：略大于系统双击超时（300ms），用于「锁定大写」时吞掉紧随单击的双击。 */
++private const val SHIFT_DOUBLE_TAP_WINDOW_MS = 400L
++
+ /**
+  * 菜单栏中动态展示的一个方案开关（来自 schema 的 `switches`）。
+  * [name] 非空为布尔开关，[options] 非空为多选一开关；[currentIndex] 为当前状态在 [states] 中的下标。
+@@ -188,6 +191,9 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
+     private val _shiftMode = MutableStateFlow(ShiftMode.OFF)
+     val shiftMode: StateFlow<ShiftMode> = _shiftMode.asStateFlow()
+ 
++    /** 最近一次 shift 单击时刻（elapsedRealtime），用于「锁定大写」下区分双击与再次单击。 */
++    private var lastShiftTapAt = 0L
++
+     // 首帧布局：从持久化方案同步推导，不依赖引擎异步就绪。
+     // 冷启动/服务重建时若用固定默认值，弹出键盘会先渲染全键盘、
+     // 引擎就绪更新方案后才切到九键/笔画，表现为布局闪烁
+@@ -464,6 +470,11 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
+     }
+ 
+     fun toggleShift() {
++        // 开启「锁定大写」时，所有走 toggle_shift 的 shift 键也按锁定大写语义
++        if (SettingsPreferences.isShiftCapsLockEnabled(getApplication())) {
++            singleTapShift()
++            return
++        }
+         _isShifted.update { !it }
+     }
+ 
+@@ -472,6 +483,14 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
+     }
+ 
+     fun singleTapShift() {
++        if (SettingsPreferences.isShiftCapsLockEnabled(getApplication())) {
++            // 锁定大写：单击 shift 直接在大写锁定与解除之间切换
++            val lock = _shiftMode.value != ShiftMode.CAPS
++            _isShifted.value = lock
++            _shiftMode.value = if (lock) ShiftMode.CAPS else ShiftMode.OFF
++            lastShiftTapAt = android.os.SystemClock.elapsedRealtime()
++            return
++        }
+         when (_shiftMode.value) {
+             ShiftMode.OFF -> {
+                 _isShifted.value = true
+@@ -485,6 +504,12 @@ class KeyboardViewModel(application: Application) : AndroidViewModel(application
+     }
+ 
+     fun doubleTapShift() {
++        // 开启「锁定大写」后单击即已锁定，快速双击视为重复单击：保持锁定，不再反转
++        if (SettingsPreferences.isShiftCapsLockEnabled(getApplication()) &&
++            android.os.SystemClock.elapsedRealtime() - lastShiftTapAt <= SHIFT_DOUBLE_TAP_WINDOW_MS
++        ) {
++            return
++        }
+         when (_shiftMode.value) {
+             ShiftMode.CAPS -> {
+                 _isShifted.value = false
+diff --git a/app/src/main/res/values-zh-rHK/strings.xml b/app/src/main/res/values-zh-rHK/strings.xml
+index 8e55318..f1c6ffe 100644
+--- a/app/src/main/res/values-zh-rHK/strings.xml
++++ b/app/src/main/res/values-zh-rHK/strings.xml
+@@ -1087,6 +1087,8 @@
+     <string name="s_zimudaxiaoxie_fu">關閉顯示小寫，開啟顯示大寫。</string>
+     <string name="s_gensuishiftjianqiehuan">跟隨 Shift 鍵切換</string>
+     <string name="s_gensuishiftjianqiehuan_fu">小寫模式下 Shift 狀態立即反映到鍵面；關閉後始終顯示小寫。選擇大寫時此項不生效。</string>
++    <string name="s_suodingdaxie">鎖定大寫</string>
++    <string name="s_suodingdaxie_fu">開啟後單擊 Shift 鍵即鎖定大寫字母，再次單擊解除；關閉時仍為單擊臨時大寫、雙擊鎖定。</string>
+     <string name="s_jianpanxianshizihao">鍵盤顯示字號</string>
+     <string name="s_jianpanxianshizihao_fu">調整鍵盤按鍵上的字元大小，80%%–130%%。</string>
+     <string name="s_lianianliangcikonggecharubiaodian">連按兩次空格插入指定標點</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 798fc10..f8341d9 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -1289,6 +1289,8 @@
+     <string name="s_zimudaxiaoxie_fu">关闭显示小写，开启显示大写。</string>
+     <string name="s_gensuishiftjianqiehuan">跟随 Shift 键切换</string>
+     <string name="s_gensuishiftjianqiehuan_fu">小写模式下 Shift 状态立即反映到键面；关闭后始终显示小写。选择大写时此项不生效。</string>
++    <string name="s_suodingdaxie">锁定大写</string>
++    <string name="s_suodingdaxie_fu">开启后单击 Shift 键即锁定大写字母，再次单击解除；关闭时仍为单击临时大写、双击锁定。</string>
+     <string name="s_jianpanxianshizihao">键盘显示字号</string>
+     <string name="s_jianpanxianshizihao_fu">调整键盘按键上的字符大小，80%%–130%%。</string>
+     <string name="s_lianianliangcikonggecharubiaodian">连按两次空格插入指定标点</string>
